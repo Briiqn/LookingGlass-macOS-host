@@ -30,6 +30,9 @@
 #include "common/crash.h"
 #include "common/thread.h"
 #include "common/ivshmem.h"
+#ifdef LG_HOST_INPUT
+#include "input.h"
+#endif
 #include "common/sysinfo.h"
 #include "common/time.h"
 #include "common/stringutils.h"
@@ -710,6 +713,10 @@ static void lgmpShutdown(void)
   if (app.lgmpTimer)
     lgTimerDestroy(app.lgmpTimer);
 
+#ifdef LG_HOST_INPUT
+  inputHost_free();
+#endif
+
   for(int i = 0; i < LGMP_Q_FRAME_LEN; ++i)
     lgmpHostMemFree(&app.frameMemory[i]);
   for(int i = 0; i < LGMP_Q_POINTER_LEN; ++i)
@@ -766,7 +773,10 @@ static bool newKVMFRData(KVMFRUserData * dst)
     {
       .magic    = KVMFR_MAGIC,
       .version  = KVMFR_VERSION,
-      .features = os_hasSetCursorPos() ? KVMFR_FEATURE_SETCURSORPOS : 0
+      .features = (os_hasSetCursorPos() ? KVMFR_FEATURE_SETCURSORPOS : 0)
+#ifdef LG_HOST_INPUT
+        | KVMFR_FEATURE_INPUT
+#endif
     };
     strncpy(kvmfr.hostver, BUILD_VERSION, sizeof(kvmfr.hostver) - 1);
     if (!appendData(dst, &kvmfr, sizeof(kvmfr)))
@@ -877,6 +887,11 @@ static bool lgmpSetup(struct IVSHMEM * shmDev)
     memset(lgmpHostMemPtr(app.pointerShapeMemory[i]), 0, MAX_POINTER_SIZE);
   }
 
+#ifdef LG_HOST_INPUT
+  if (!inputHost_setup(app.lgmp))
+    goto fail_lgmp;
+#endif
+
   const size_t frameMemoryAvail = lgmpHostMemAvail(app.lgmp);
   if (!app.alignSize ||
       (size_t)app.alignSize <
@@ -933,6 +948,11 @@ static bool lgmpSetup(struct IVSHMEM * shmDev)
     DEBUG_ERROR("Failed to create the LGMP timer");
     goto fail_lgmp;
   }
+
+#ifdef LG_HOST_INPUT
+  if (!inputHost_start())
+    DEBUG_WARN("Failed to start the input transport, input will use SPICE");
+#endif
 
   free(udata.data);
   return true;

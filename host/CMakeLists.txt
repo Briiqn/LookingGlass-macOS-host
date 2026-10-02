@@ -91,6 +91,12 @@ set(SOURCES
   src/downsample_parser.c
 )
 
+if(APPLE)
+  # KVMFR input over LGMP, injected by the platform's os_input* functions
+  list(APPEND SOURCES src/input.c)
+  add_compile_definitions(LG_HOST_INPUT)
+endif()
+
 add_subdirectory("${PROJECT_TOP}/common"          "${CMAKE_BINARY_DIR}/common")
 add_subdirectory("${PROJECT_TOP}/repos/LGMP/lgmp" "${CMAKE_BINARY_DIR}/lgmp"  )
 add_subdirectory(platform)
@@ -114,6 +120,8 @@ target_link_libraries(looking-glass-host
 
 if(WIN32)
   set_target_properties(looking-glass-host PROPERTIES LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+elseif(APPLE)
+  set_target_properties(looking-glass-host PROPERTIES LINK_FLAGS "-Wl,-dead_strip")
 else()
   set_target_properties(looking-glass-host PROPERTIES LINK_FLAGS "-Wl,--gc-sections -z noexecstack")
 endif()

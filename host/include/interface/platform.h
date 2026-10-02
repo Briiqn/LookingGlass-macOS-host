@@ -58,3 +58,22 @@ const char * os_getOSName(void);
 // returns the UUID that was given to the VM, this can be obtained from the
 // SMBIOS. Must return exactly 16 bytes or NULL.
 const uint8_t * os_getUUID(void);
+
+#ifdef LG_HOST_INPUT
+// Input injection for KVMFR input over LGMP (see input.h).
+// Buttons use the KVMFR bit layout: bit 0 left, bit 1 right, bit 2 middle,
+// bit 3+ extra buttons. Absolute positions range 0..KVMFR_INPUT_MOUSE_ABSOLUTE_MAX
+// across the captured display. Keyboard reports are USB HID boot reports.
+
+// true if input can currently be injected (e.g. permission granted)
+bool os_inputAvailable(void);
+// release every key and button that is held down
+void os_inputReset(void);
+bool os_inputMouseRelative(int32_t dx, int32_t dy, int32_t wheel,
+    uint32_t buttons);
+bool os_inputMouseAbsolute(uint16_t x, uint16_t y, int32_t wheel,
+    uint32_t buttons);
+bool os_inputKeyboard(uint8_t modifiers, const uint8_t keys[6]);
+// current KVMFR_INPUT_KEYBOARD_LED_* flags, false if unknown
+bool os_inputKeyboardLEDs(uint8_t * leds);
+#endif
