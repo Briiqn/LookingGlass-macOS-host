@@ -93,8 +93,8 @@ set(SOURCES
 
 if(APPLE)
   # KVMFR input over LGMP, injected by the platform's os_input* functions
-  list(APPEND SOURCES src/input.c)
-  add_compile_definitions(LG_HOST_INPUT)
+  list(APPEND SOURCES src/input.c src/clipboard.c)
+  add_compile_definitions(LG_HOST_INPUT LG_HOST_CLIPBOARD)
 endif()
 
 add_subdirectory("${PROJECT_TOP}/common"          "${CMAKE_BINARY_DIR}/common")

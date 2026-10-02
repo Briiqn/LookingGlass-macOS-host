@@ -33,6 +33,9 @@
 #ifdef LG_HOST_INPUT
 #include "input.h"
 #endif
+#ifdef LG_HOST_CLIPBOARD
+#include "clipboard.h"
+#endif
 #include "common/sysinfo.h"
 #include "common/time.h"
 #include "common/stringutils.h"
@@ -717,6 +720,10 @@ static void lgmpShutdown(void)
   inputHost_free();
 #endif
 
+#ifdef LG_HOST_CLIPBOARD
+  clipboardHost_free();
+#endif
+
   for(int i = 0; i < LGMP_Q_FRAME_LEN; ++i)
     lgmpHostMemFree(&app.frameMemory[i]);
   for(int i = 0; i < LGMP_Q_POINTER_LEN; ++i)
@@ -776,6 +783,9 @@ static bool newKVMFRData(KVMFRUserData * dst)
       .features = (os_hasSetCursorPos() ? KVMFR_FEATURE_SETCURSORPOS : 0)
 #ifdef LG_HOST_INPUT
         | KVMFR_FEATURE_INPUT
+#endif
+#ifdef LG_HOST_CLIPBOARD
+        | KVMFR_FEATURE_CLIPBOARD
 #endif
     };
     strncpy(kvmfr.hostver, BUILD_VERSION, sizeof(kvmfr.hostver) - 1);
@@ -892,6 +902,11 @@ static bool lgmpSetup(struct IVSHMEM * shmDev)
     goto fail_lgmp;
 #endif
 
+#ifdef LG_HOST_CLIPBOARD
+  if (!clipboardHost_setup(app.lgmp))
+    goto fail_lgmp;
+#endif
+
   const size_t frameMemoryAvail = lgmpHostMemAvail(app.lgmp);
   if (!app.alignSize ||
       (size_t)app.alignSize <
@@ -952,6 +967,11 @@ static bool lgmpSetup(struct IVSHMEM * shmDev)
 #ifdef LG_HOST_INPUT
   if (!inputHost_start())
     DEBUG_WARN("Failed to start the input transport, input will use SPICE");
+#endif
+
+#ifdef LG_HOST_CLIPBOARD
+  if (!clipboardHost_start())
+    DEBUG_WARN("Failed to start the clipboard transport");
 #endif
 
   free(udata.data);

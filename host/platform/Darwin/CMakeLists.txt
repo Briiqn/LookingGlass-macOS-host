@@ -8,10 +8,11 @@ include_directories(
 add_library(platform_Darwin STATIC
   src/platform.c
   src/input.m
+  src/clipboard.m
 )
 
 target_compile_options(platform_Darwin PRIVATE $<$<COMPILE_LANGUAGE:OBJC>:-fobjc-arc>)
-target_compile_definitions(platform_Darwin PRIVATE LG_HOST_INPUT)
+target_compile_definitions(platform_Darwin PRIVATE LG_HOST_INPUT LG_HOST_CLIPBOARD)
 
 add_subdirectory("capture")
 
@@ -19,6 +20,7 @@ target_link_libraries(platform_Darwin
   m
   capture
   pthread
+  lgmp
   "-framework CoreGraphics"
   "-framework ApplicationServices"
   "-framework AppKit"

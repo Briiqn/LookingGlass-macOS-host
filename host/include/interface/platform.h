@@ -77,3 +77,22 @@ bool os_inputKeyboard(uint8_t modifiers, const uint8_t keys[6]);
 // current KVMFR_INPUT_KEYBOARD_LED_* flags, false if unknown
 bool os_inputKeyboardLEDs(uint8_t * leds);
 #endif
+
+#ifdef LG_HOST_CLIPBOARD
+#include <LGProtocol/KVMFRClipboard.h>
+// OS clipboard for KVMFR clipboard over LGMP (see clipboard.h). All of these
+// are called from the clipboard worker thread.
+
+void os_clipboardStart(void);
+void os_clipboardStop(void);
+// called every worker iteration: watch the OS clipboard, pump transfers
+void os_clipboardTick(void);
+// a client became (or stopped being) the clipboard owner
+void os_clipboardOwnerChanged(bool owned);
+// a validated control record from the owner (everything except CLAIM,
+// RELEASE and KEEPALIVE, which the transport handles)
+void os_clipboardMessage(const KVMFRClipboardMessage * message);
+// a validated DATA or FILE_DATA record from the owner
+void os_clipboardStreamData(const KVMFRClipboardMessage * record,
+    const uint8_t * data);
+#endif
