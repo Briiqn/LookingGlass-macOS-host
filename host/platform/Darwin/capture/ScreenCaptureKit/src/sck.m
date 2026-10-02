@@ -63,7 +63,9 @@ struct sck
   CaptureGetPointerBuffer  getPointerBufferFn;
   CapturePostPointerBuffer postPointerBufferFn;
   LGThread               * pointerThread;
+  LGThread               * shapeThread;
   atomic_bool              pointerStop;
+  _Atomic(uint64_t)        hotspot;       // hx << 32 | hy, in pixels
 
   CGRect             displayBounds; // in points, global coordinates
   double             scale;         // pixels per point
@@ -313,6 +315,7 @@ static bool sck_init(void * ivshmemBase, unsigned * alignSize)
 }
 
 static int pointerThread(void * unused);
+static int shapeThread(void * unused);
 
 static bool sck_start(void)
 {
@@ -330,6 +333,11 @@ static void sck_stop(void)
   {
     lgJoinThread(this->pointerThread, NULL);
     this->pointerThread = NULL;
+  }
+  if (this->shapeThread)
+  {
+    lgJoinThread(this->shapeThread, NULL);
+    this->shapeThread = NULL;
   }
 
   // wake capture() so the app can shut down
@@ -395,55 +403,90 @@ static bool readCursorShape(CapturePointer * pointer, void * data,
   }
 }
 
+static CGPoint cursorLocation(void)
+{
+  CGEventRef ev = CGEventCreate(NULL);
+  const CGPoint loc = CGEventGetLocation(ev);
+  CFRelease(ev);
+  return loc;
+}
+
+static inline int toPixelX(CGPoint loc, unsigned hx)
+{
+  return (int)((loc.x - this->displayBounds.origin.x) * this->scale) - (int)hx;
+}
+
+static inline int toPixelY(CGPoint loc, unsigned hy)
+{
+  return (int)((loc.y - this->displayBounds.origin.y) * this->scale) - (int)hy;
+}
+
+// Reports the cursor position every millisecond. It never waits on the
+// cursor shape: reading the shape goes through the WindowServer and takes
+// 5-25 ms when it is busy (e.g. Dock magnification), which made the cursor
+// stutter when both were done on one thread.
 static int pointerThread(void * unused)
 {
-  int      lastX = INT32_MIN, lastY = INT32_MIN;
-  unsigned hx = 0, hy = 0;
-  uint64_t lastHash = 0;
-  unsigned tick = 0;
+  int lastX = INT32_MIN, lastY = INT32_MIN;
 
   while (!atomic_load(&this->pointerStop))
   {
-    CapturePointer pointer = { 0 };
+    const uint64_t hot = atomic_load(&this->hotspot);
+    const unsigned hx  = (unsigned)(hot >> 32);
+    const unsigned hy  = (unsigned)hot;
 
-    // the shape changes rarely, check it every 8 ms
-    if ((tick++ & 7) == 0)
+    const CGPoint loc = cursorLocation();
+
+    const int x = toPixelX(loc, hx);
+    const int y = toPixelY(loc, hy);
+    if (x != lastX || y != lastY)
     {
-      void   * data;
-      uint32_t size;
-      if (this->getPointerBufferFn(&data, &size) &&
-          readCursorShape(&pointer, data, size, &lastHash))
+      CapturePointer pointer =
       {
-        hx = pointer.hx;
-        hy = pointer.hy;
-      }
-    }
-
-    CGEventRef ev = CGEventCreate(NULL);
-    CGPoint loc = CGEventGetLocation(ev);
-    CFRelease(ev);
-
-    const int x = (int)((loc.x - this->displayBounds.origin.x) * this->scale) - hx;
-    const int y = (int)((loc.y - this->displayBounds.origin.y) * this->scale) - hy;
-    if (x != lastX || y != lastY || pointer.shapeUpdate)
-    {
-      pointer.positionUpdate = true;
-      pointer.x = lastX = x;
-      pointer.y = lastY = y;
-    }
-
-    if (pointer.positionUpdate || pointer.shapeUpdate)
-    {
-      pointer.visible = true;
-      if (!pointer.shapeUpdate)
-      {
-        pointer.hx = hx;
-        pointer.hy = hy;
-      }
+        .positionUpdate = true,
+        .visible        = true,
+        .x              = x,
+        .y              = y,
+        .hx             = hx,
+        .hy             = hy
+      };
+      lastX = x;
+      lastY = y;
       this->postPointerBufferFn(&pointer);
     }
 
     usleep(1000);
+  }
+
+  return 0;
+}
+
+// Checks the cursor shape every 8 ms and posts it when it changes.
+static int shapeThread(void * unused)
+{
+  uint64_t lastHash = 0;
+
+  while (!atomic_load(&this->pointerStop))
+  {
+    CapturePointer pointer = { 0 };
+    void   * data;
+    uint32_t size;
+    if (this->getPointerBufferFn(&data, &size) &&
+        readCursorShape(&pointer, data, size, &lastHash))
+    {
+      atomic_store(&this->hotspot,
+          ((uint64_t)pointer.hx << 32) | (uint64_t)pointer.hy);
+
+      // send the position with the new hotspot so the image does not jump
+      const CGPoint loc = cursorLocation();
+      pointer.positionUpdate = true;
+      pointer.visible        = true;
+      pointer.x              = toPixelX(loc, pointer.hx);
+      pointer.y              = toPixelY(loc, pointer.hy);
+      this->postPointerBufferFn(&pointer);
+    }
+
+    usleep(8000);
   }
 
   return 0;
@@ -505,6 +548,13 @@ static CaptureResult sck_capture(
       !lgCreateThread("SCKPointer", pointerThread, NULL, &this->pointerThread))
   {
     DEBUG_ERROR("Failed to create the pointer thread");
+    return CAPTURE_RESULT_ERROR;
+  }
+
+  if (!this->shapeThread &&
+      !lgCreateThread("SCKShape", shapeThread, NULL, &this->shapeThread))
+  {
+    DEBUG_ERROR("Failed to create the cursor shape thread");
     return CAPTURE_RESULT_ERROR;
   }
 
@@ -591,6 +641,7 @@ static CaptureResult sck_getFrame(
       (size_t)this->pitch * height);
 
   CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+
   return CAPTURE_RESULT_OK;
 }
 
