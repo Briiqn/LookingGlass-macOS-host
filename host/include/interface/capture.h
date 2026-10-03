@@ -120,6 +120,11 @@ typedef struct CapturePointer
 CapturePointer;
 
 typedef bool (*CaptureGetPointerBuffer )(void ** data, uint32_t * size);
+
+// number of pointer messages the client has not consumed yet; a capture
+// backend can skip position-only updates while this is non-zero so the
+// client never works through stale positions
+unsigned capturePointerPending(void);
 typedef void (*CapturePostPointerBuffer)(const CapturePointer * pointer);
 
 typedef struct CaptureInterface

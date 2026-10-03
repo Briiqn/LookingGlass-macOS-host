@@ -583,6 +583,11 @@ static bool captureStop(void)
   return true;
 }
 
+unsigned capturePointerPending(void)
+{
+  return app.pointerQueue ? lgmpHostQueuePending(app.pointerQueue) : 0;
+}
+
 bool captureGetPointerBuffer(void ** data, uint32_t * size)
 {
   PLGMPMemory mem = app.pointerShapeMemory[app.pointerShapeIndex];

@@ -38,10 +38,26 @@
 #include "common/thread.h"
 #include "common/option.h"
 #include "common/util.h"
+// from common/rects.h, which cannot be included here: its Point type
+// clashes with the macOS one
+bool rectsBufferToFramebuffer(const KVMFRFrameDamageRect * rects, int count,
+  int bpp, KVMFRFrameBuffer * frame, int dstPitch, int height,
+  const uint8_t * src, int srcPitch);
+
+#include <LGProtocol/LGMPConfig.h>
+#include <math.h>
 
 #include <stdatomic.h>
 #include <pthread.h>
 #include <unistd.h>
+
+// changed areas of a frame, count -1 means the whole frame
+typedef struct FrameDamage
+{
+  int                  count;
+  KVMFRFrameDamageRect rects[KVMFR_MAX_DAMAGE_RECTS];
+}
+FrameDamage;
 
 struct sck
 {
@@ -52,6 +68,10 @@ struct sck
   pthread_mutex_t    lock;
   CVPixelBufferRef   pending;     // newest frame from ScreenCaptureKit
   CVPixelBufferRef   current;     // frame being sent
+  FrameDamage        pendingDamage; // changes since the last frame taken
+  FrameDamage        currentDamage; // changes in current vs the previous one
+  // per shared memory frame buffer: changes since it was last written
+  FrameDamage        slotDamage[LGMP_Q_FRAME_LEN];
 
   unsigned           width, height, pitch;
   unsigned           formatVer;
@@ -101,9 +121,64 @@ static struct sck * this = NULL;
   if (!pb)
     return;
 
+  // the changed areas, in pixels of the frame
+  FrameDamage damage = { .count = -1 };
+  NSArray * dirty = info[SCStreamFrameInfoDirtyRects];
+  const double w = CVPixelBufferGetWidth (pb);
+  const double h = CVPixelBufferGetHeight(pb);
+  if (dirty.count && dirty.count <= KVMFR_MAX_DAMAGE_RECTS)
+  {
+    damage.count = 0;
+    for (id value in dirty)
+    {
+      CGRect r;
+      if (![value isKindOfClass:NSDictionary.class] ||
+          !CGRectMakeWithDictionaryRepresentation(
+            (__bridge CFDictionaryRef)value, &r))
+      {
+        damage.count = -1;
+        break;
+      }
+
+      const double x0 = floor(fmax(0, r.origin.x));
+      const double y0 = floor(fmax(0, r.origin.y));
+      const double x1 = ceil (fmin(w, r.origin.x + r.size.width ));
+      const double y1 = ceil (fmin(h, r.origin.y + r.size.height));
+      if (x1 <= x0 || y1 <= y0)
+        continue;
+
+      damage.rects[damage.count++] = (KVMFRFrameDamageRect)
+      {
+        .x      = (uint32_t)x0,
+        .y      = (uint32_t)y0,
+        .width  = (uint32_t)(x1 - x0),
+        .height = (uint32_t)(y1 - y0)
+      };
+    }
+    // nothing usable reported, be safe
+    if (damage.count == 0)
+      damage.count = -1;
+  }
+
   CVPixelBufferRetain(pb);
   pthread_mutex_lock(&this->lock);
   CVPixelBufferRef old = this->pending;
+  if (old)
+  {
+    // the previous frame was never sent, its changes carry over
+    FrameDamage * pd = &this->pendingDamage;
+    if (pd->count < 0 || damage.count < 0 ||
+        pd->count + damage.count > KVMFR_MAX_DAMAGE_RECTS)
+      pd->count = -1;
+    else
+    {
+      memcpy(pd->rects + pd->count, damage.rects,
+          damage.count * sizeof(*damage.rects));
+      pd->count += damage.count;
+    }
+  }
+  else
+    this->pendingDamage = damage;
   this->pending = pb;
   pthread_mutex_unlock(&this->lock);
   if (old)
@@ -137,6 +212,14 @@ static void sck_initOptions(void)
       .module       = "sck",
       .name         = "display",
       .description  = "The CGDirectDisplayID to capture (0 = main display)",
+      .type         = OPTION_TYPE_INT,
+      .value.x_int  = 0
+    },
+    {
+      .module       = "sck",
+      .name         = "maxFps",
+      .description  = "Capture at most this many frames per second "
+                      "(0 = the display refresh rate)",
       .type         = OPTION_TYPE_INT,
       .value.x_int  = 0
     },
@@ -267,8 +350,13 @@ static bool sck_init(void * ivshmemBase, unsigned * alignSize)
     cfg.showsCursor          = NO;
     cfg.scalesToFit          = NO;
     cfg.queueDepth           = 4;
-    // the default is 60 fps, allow one frame per display refresh
-    cfg.minimumFrameInterval = CMTimeMake(1, (int32_t)(refresh + 0.5));
+    // the default is 60 fps, allow one frame per display refresh unless
+    // capped (no point sending more frames than the client can show)
+    int fps = (int)(refresh + 0.5);
+    const int maxFps = option_get_int("sck", "maxFps");
+    if (maxFps > 0 && maxFps < fps)
+      fps = maxFps;
+    cfg.minimumFrameInterval = CMTimeMake(1, fps);
 
     this->queue = dispatch_queue_create("lg.sck.output",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
@@ -307,8 +395,14 @@ static bool sck_init(void * ivshmemBase, unsigned * alignSize)
     this->output = output;
 
     DEBUG_INFO("Display          : %u", display.displayID);
-    DEBUG_INFO("Frame Size       : %zu x %zu @ %.0f Hz", width, height, refresh);
+    DEBUG_INFO("Frame Size       : %zu x %zu @ %.0f Hz, capturing at %d fps",
+        width, height, refresh, fps);
   }
+
+  this->pendingDamage.count = -1;
+  this->currentDamage.count = -1;
+  for (int i = 0; i < LGMP_Q_FRAME_LEN; ++i)
+    this->slotDamage[i].count = -1;
 
   this->initialized = true;
   return true;
@@ -428,6 +522,8 @@ static inline int toPixelY(CGPoint loc, unsigned hy)
 static int pointerThread(void * unused)
 {
   int lastX = INT32_MIN, lastY = INT32_MIN;
+  uint64_t statStart = microtime();
+  unsigned skipped = 0, maxPending = 0;
 
   while (!atomic_load(&this->pointerStop))
   {
@@ -439,6 +535,27 @@ static int pointerThread(void * unused)
 
     const int x = toPixelX(loc, hx);
     const int y = toPixelY(loc, hy);
+    if (microtime() - statStart > 5000000)
+    {
+      if (skipped)
+        DEBUG_INFO("Cursor backlog: %u updates coalesced, max %u pending",
+            skipped, maxPending);
+      statStart = microtime();
+      skipped = maxPending = 0;
+    }
+
+    // coalesce while the client is behind: it then gets only the newest
+    // position instead of working through a queue of stale ones
+    const unsigned pending = capturePointerPending();
+    if (pending > maxPending)
+      maxPending = pending;
+    if (pending && (x != lastX || y != lastY))
+    {
+      ++skipped;
+      usleep(250);
+      continue;
+    }
+
     if (x != lastX || y != lastY)
     {
       CapturePointer pointer =
@@ -567,6 +684,8 @@ static CaptureResult sck_capture(
   pthread_mutex_lock(&this->lock);
   CVPixelBufferRef pb = this->pending;
   this->pending = NULL;
+  if (pb)
+    this->currentDamage = this->pendingDamage;
   pthread_mutex_unlock(&this->lock);
 
   if (!pb)
@@ -597,6 +716,11 @@ static CaptureResult sck_waitFrame(
     this->height = height;
     this->pitch  = pitch;
     ++this->formatVer;
+
+    // a new format invalidates every buffer
+    this->currentDamage.count = -1;
+    for (int i = 0; i < LGMP_Q_FRAME_LEN; ++i)
+      this->slotDamage[i].count = -1;
   }
 
   const unsigned maxHeight = maxFrameSize / pitch;
@@ -613,7 +737,15 @@ static CaptureResult sck_waitFrame(
   frame->stride       = pitch / 4;
   frame->format       = CAPTURE_FMT_BGRA;
   frame->rotation     = CAPTURE_ROT_0;
-  frame->damageRectsCount = 0;
+  // 0 rects tells the client the whole frame changed
+  if (this->currentDamage.count > 0)
+  {
+    frame->damageRectsCount = this->currentDamage.count;
+    memcpy(frame->damageRects, this->currentDamage.rects,
+        this->currentDamage.count * sizeof(*frame->damageRects));
+  }
+  else
+    frame->damageRectsCount = 0;
 
   return CAPTURE_RESULT_OK;
 }
@@ -637,8 +769,42 @@ static CaptureResult sck_getFrame(
 
   const unsigned maxHeight = maxFrameSize / this->pitch;
   const unsigned height    = min(maxHeight, this->height);
-  framebuffer_write(frame, CVPixelBufferGetBaseAddress(pb),
-      (size_t)this->pitch * height);
+  const uint8_t * src      = CVPixelBufferGetBaseAddress(pb);
+
+  // This buffer still holds the frame from LGMP_Q_FRAME_LEN frames ago, so
+  // copy every area that changed since then, not just this frame's changes.
+  FrameDamage * slot = &this->slotDamage[frameBufferIndex % LGMP_Q_FRAME_LEN];
+  const FrameDamage * cur = &this->currentDamage;
+
+  if (cur->count <= 0 || slot->count < 0 ||
+      slot->count + cur->count > KVMFR_MAX_DAMAGE_RECTS)
+    framebuffer_write(frame, src, (size_t)this->pitch * height);
+  else
+  {
+    memcpy(slot->rects + slot->count, cur->rects,
+        cur->count * sizeof(*cur->rects));
+    slot->count += cur->count;
+    if (!rectsBufferToFramebuffer(slot->rects, slot->count, 4, frame,
+          this->pitch, height, src, this->pitch))
+      framebuffer_write(frame, src, (size_t)this->pitch * height);
+  }
+
+
+  // this buffer is now current, the others fall one more frame behind
+  for (int i = 0; i < LGMP_Q_FRAME_LEN; ++i)
+  {
+    FrameDamage * d = &this->slotDamage[i];
+    if (i == (int)(frameBufferIndex % LGMP_Q_FRAME_LEN))
+      d->count = 0;
+    else if (cur->count > 0 && d->count >= 0 &&
+             d->count + cur->count <= KVMFR_MAX_DAMAGE_RECTS)
+    {
+      memcpy(d->rects + d->count, cur->rects, cur->count * sizeof(*cur->rects));
+      d->count += cur->count;
+    }
+    else
+      d->count = -1;
+  }
 
   CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
 
