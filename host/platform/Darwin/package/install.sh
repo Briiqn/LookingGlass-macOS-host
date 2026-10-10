@@ -26,9 +26,12 @@ cmake --build "$BUILD" -j "$(sysctl -n hw.ncpu)"
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$PKG/Info.plist" "$APP/Contents/Info.plist"
 cp "$BUILD/looking-glass-host" "$APP/Contents/MacOS/"
+if [ -f "$PKG/AppIcon.icns" ]; then
+  cp "$PKG/AppIcon.icns" "$APP/Contents/Resources/"
+fi
 
 IDENTITY=$(security find-certificate -c "$CERT" -Z 2>/dev/null |
   awk '/SHA-1/ { print $3 }')

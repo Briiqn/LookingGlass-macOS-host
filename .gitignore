@@ -20,3 +20,5 @@ idd/*/VersionInfo.h
 idd/*/VERSION
 idd/packages
 /build-macos/
+.DS_Store
+*.DS_Store

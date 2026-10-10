@@ -59,6 +59,14 @@ tccutil reset ScreenCapture local.lgmac.LookingGlassHost
 tccutil reset Accessibility local.lgmac.LookingGlassHost
 ```
 
+### Packaging for Release
+
+To create standalone release assets (`LookingGlassHost.dmg`, `LookingGlassHost-Installer.pkg`, and `LookingGlassHost.zip`) for distribution:
+
+```sh
+host/platform/Darwin/package/build-release.sh [output-dir]
+```
+
 ## Options
 
 The host reads `~/looking-glass-host.ini`.
